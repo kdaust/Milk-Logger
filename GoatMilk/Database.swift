@@ -141,6 +141,25 @@ final class Database {
         }
     }
 
+    func distributions(for goatID: Int64) throws -> [MilkDistribution] {
+        let statement = try prepare("SELECT session, weight_grams FROM milk_records WHERE goat_id = ? ORDER BY weight_grams;")
+        defer { sqlite3_finalize(statement) }
+        try bind(goatID, to: 1, in: statement)
+        var weights: [MilkingSession: [Int64]] = [:]
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { break }
+            guard status == SQLITE_ROW else { throw databaseError() }
+            guard let session = MilkingSession(rawValue: string(statement, 0)) else {
+                throw MilkError.message("A saved milking session could not be read.")
+            }
+            weights[session, default: []].append(sqlite3_column_int64(statement, 1))
+        }
+        return MilkingSession.allCases.map {
+            MilkDistribution(goatID: goatID, session: $0, weights: weights[$0, default: []])
+        }
+    }
+
     func addGoat(name: String) throws {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name.count <= 60 else {

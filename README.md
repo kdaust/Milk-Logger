@@ -45,6 +45,10 @@ When a day has only a morning or evening record, the chart doubles that weight a
 
 On a simulator, compare two goats with different date ranges; add and remove goats; check that the add menu excludes selected goats and disables when all are selected. Verify a single-session day is doubled, then add its second session and confirm the chart switches to the actual sum. Check a zero yield, a goat without records, retired goats, large text, and VoiceOver.
 
+The Data tab also compares **Morning vs evening** with a violin chart using all saved individual milkings for the same selected goats. Each session has one violin per goat, arranged side by side with colors shared across both charts. A violin uses a Gaussian kernel density estimate (81 samples, bandwidth `max(1 g, 1.06 × sample standard deviation × n^(-0.2))`), restricted to the observed weight range. Each violin has the same peak width, so width describes relative frequency within that distribution, not the number of records. The chart includes median dots and text summaries with sample counts. Fewer than three observations or identical weights are shown as recorded-value dots, and missing sessions are explicitly labeled. Zero yields are included; doubled daily estimates are excluded. No schema change is required.
+
+Simulator checks for this chart: add multiple goats, including a retired goat with a reused name; verify colors match the production chart and sessions stay separate. Check empty sessions, one or two records, repeated identical weights, zero yields, and a varied distribution. Save/delete a milking and confirm the distribution and count refresh. Check large text and VoiceOver.
+
 ## Stored data
 
 The database lives inside the app sandbox at **Application Support/GoatMilk/milk.sqlite**. It persists across app launches; deleting the app removes its local data. The draft has no cloud sync, export, or backup UI, and unsaved form values do not survive app termination.

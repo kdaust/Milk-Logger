@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var dataGoats: [Goat] = []
     @State private var selectedDataGoatIDs: [Int64] = []
     @State private var dailyTotalsByGoat: [Int64: [DailyMilkTotal]] = [:]
+    @State private var distributions: [MilkDistribution] = []
     @State private var newGoatName = ""
     @State private var weights: [Int64: String] = [:]
     @State private var inHeat: [Int64: Bool] = [:]
@@ -275,6 +276,22 @@ struct ContentView: View {
                             Text("Morning and evening weights are added together. When only one session is recorded, its weight is doubled to estimate the full day. Dots show recorded days; connecting lines do not imply measurements on missing days.")
                         }
                     }
+                    Section {
+                        if distributions.allSatisfy({ $0.weights.isEmpty }) {
+                            Text("Save milkings to compare morning and evening weights.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            distributionChart
+                                .frame(height: 280)
+                                .padding(.vertical, 12)
+                        }
+                        ForEach(distributions) { distribution in
+                            distributionSummary(distribution)
+                        }
+                    } header: { Text("Morning vs evening · grams") }
+                    footer: {
+                        Text("All recorded milkings for the selected goats. Wider parts show more common weights; each violin has equal maximum width. Dots mark medians. Fewer than three records, or identical weights, show individual weights instead of a violin. Missing sessions are omitted; daily estimates are not used.")
+                    }
                     ForEach(selectedDataGoats) { goat in
                         Section("Daily totals · \(dataGoatLabel(goat))") {
                             if dailyTotalsByGoat[goat.id, default: []].isEmpty {
@@ -320,6 +337,7 @@ struct ContentView: View {
             }
         }
         .chartLegend(position: .bottom)
+        .chartForegroundStyleScale(domain: selectedDataGoats.map(dataGoatLabel))
         .chartYScale(domain: 0...max(1, Double(chartTotals.map(\.chartWeightGrams).max() ?? 0) * 1.1))
         .chartXScale(domain: chartDateRange)
         .chartXAxis {
@@ -337,6 +355,74 @@ struct ContentView: View {
         .chartXAxisLabel("Date")
         .environment(\.timeZone, TimeZone(secondsFromGMT: 0)!)
         .environment(\.calendar, Calendar(identifier: .gregorian))
+    }
+
+    private var distributionChart: some View {
+        Chart {
+            ForEach(distributions) { distribution in
+                ForEach(distribution.density) { point in
+                    AreaMark(
+                        xStart: .value("Session", distributionCenter(distribution) - point.width * violinHalfWidth),
+                        xEnd: .value("Session", distributionCenter(distribution) + point.width * violinHalfWidth),
+                        y: .value("Milk (g)", point.grams),
+                        series: .value("Distribution", distribution.id)
+                    )
+                    .foregroundStyle(by: .value("Goat", distributionGoatLabel(distribution)))
+                    .opacity(0.45)
+                    .interpolationMethod(.linear)
+                    .accessibilityHidden(true)
+                }
+                if distribution.density.isEmpty {
+                    ForEach(Array(Set(distribution.weights)).sorted(), id: \.self) { grams in
+                        PointMark(x: .value("Session", distributionCenter(distribution)), y: .value("Milk (g)", grams))
+                            .foregroundStyle(by: .value("Goat", distributionGoatLabel(distribution)))
+                            .accessibilityLabel("\(distributionGoatLabel(distribution)), \(distribution.session.title)")
+                            .accessibilityValue("\(grams.formatted()) grams recorded")
+                    }
+                } else if let median = distribution.median {
+                    PointMark(x: .value("Session", distributionCenter(distribution)), y: .value("Milk (g)", median))
+                        .foregroundStyle(by: .value("Goat", distributionGoatLabel(distribution)))
+                        .accessibilityLabel("\(distributionGoatLabel(distribution)), \(distribution.session.title)")
+                        .accessibilityValue("Median \(median.formatted()) grams, \(distribution.weights.count) milkings")
+                }
+            }
+        }
+        .chartForegroundStyleScale(domain: selectedDataGoats.map(dataGoatLabel))
+        .chartLegend(position: .bottom)
+        .chartXScale(domain: -0.5...1.5)
+        .chartYScale(domain: 0...max(1, (distributions.flatMap(\.weights).max() ?? 0) * 1.1))
+        .chartXAxis {
+            AxisMarks(values: [0.0, 1.0]) { value in
+                AxisValueLabel {
+                    Text(value.as(Double.self) == 0 ? "Morning" : "Evening")
+                }
+            }
+        }
+        .chartYAxisLabel("Milk (g)")
+    }
+
+    private func distributionSummary(_ distribution: MilkDistribution) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("\(distributionGoatLabel(distribution)) · \(distribution.session.title)")
+            if let median = distribution.median {
+                Text("\(distribution.weights.count) milkings · Median \(median.formatted()) g")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("No records").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var violinHalfWidth: Double { 0.32 / Double(max(1, selectedDataGoatIDs.count)) }
+
+    private func distributionCenter(_ distribution: MilkDistribution) -> Double {
+        let index = Double(selectedDataGoatIDs.firstIndex(of: distribution.goatID) ?? 0)
+        let count = Double(max(1, selectedDataGoatIDs.count))
+        return (distribution.session == .morning ? 0 : 1) + (index - (count - 1) / 2) * 0.8 / count
+    }
+
+    private func distributionGoatLabel(_ distribution: MilkDistribution) -> String {
+        dataGoats.first { $0.id == distribution.goatID }.map(dataGoatLabel) ?? "Goat #\(distribution.goatID)"
     }
 
     private var chartDateRange: ClosedRange<Date> {
@@ -406,13 +492,17 @@ struct ContentView: View {
 
     private func reloadDailyTotals() throws {
         var loaded: [Int64: [DailyMilkTotal]] = [:]
+        var loadedDistributions: [MilkDistribution] = []
         do {
             for id in selectedDataGoatIDs {
                 loaded[id] = try database.dailyTotals(for: id)
+                loadedDistributions += try database.distributions(for: id)
             }
             dailyTotalsByGoat = loaded
+            distributions = loadedDistributions
         } catch {
             dailyTotalsByGoat = [:]
+            distributions = []
             throw error
         }
     }
