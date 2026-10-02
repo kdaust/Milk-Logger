@@ -30,11 +30,19 @@ struct MilkRecord: Identifiable {
     let goatName: String
     let weightGrams: Int64
     let session: MilkingSession
+    var inHeat: Bool = false
 }
 
 struct MilkEntry {
     let goat: Goat
     let weightGrams: Int64
+    var inHeat: Bool = false
+}
+
+struct HayReplacement: Identifiable {
+    let id: Int64
+    let recordedAt: Date
+    let session: MilkingSession
 }
 
 enum MilkError: LocalizedError {

@@ -26,10 +26,19 @@ final class Database {
         do {
             sqlite3_busy_timeout(handle, 3_000)
             try execute("PRAGMA foreign_keys = ON;")
-            guard try schemaVersion() <= 1 else {
+            let version = try schemaVersion()
+            guard version <= 2 else {
                 throw MilkError.message("This database was created by a newer app version.")
             }
-            try execute(Self.schema)
+            if version == 0 { try execute(Self.schema) }
+            if version < 2 {
+                do {
+                    try execute(Self.migrationToVersion2)
+                } catch {
+                    try? execute("ROLLBACK;")
+                    throw error
+                }
+            }
         } catch {
             sqlite3_close(handle)
             handle = nil
@@ -69,6 +78,22 @@ final class Database {
     );
     CREATE INDEX IF NOT EXISTS milk_record_dates ON milk_records(recorded_at DESC);
     PRAGMA user_version = 1;
+    COMMIT;
+    """
+
+    /// Upgrade existing records in place; hay events belong to the herd, not a goat.
+    static let migrationToVersion2 = """
+    BEGIN IMMEDIATE;
+    ALTER TABLE milk_records ADD COLUMN in_heat INTEGER NOT NULL DEFAULT 0 CHECK(in_heat IN (0, 1));
+    CREATE TABLE hay_replacements (
+        id INTEGER PRIMARY KEY,
+        recorded_at TEXT NOT NULL,
+        local_day TEXT NOT NULL,
+        timezone_id TEXT NOT NULL,
+        session TEXT NOT NULL CHECK(session IN ('morning', 'evening'))
+    );
+    CREATE INDEX hay_replacement_dates ON hay_replacements(recorded_at DESC);
+    PRAGMA user_version = 2;
     COMMIT;
     """
 
@@ -139,7 +164,7 @@ final class Database {
         try finish(statement)
     }
 
-    func save(entries: [MilkEntry], at date: Date, session: MilkingSession, timeZone: TimeZone = .current) throws {
+    func save(entries: [MilkEntry], at date: Date, session: MilkingSession, timeZone: TimeZone = .current, hayReplaced: Bool = false) throws {
         guard !entries.isEmpty else { throw MilkError.message("Enter a weight for at least one goat.") }
         guard entries.allSatisfy({ (0...100_000).contains($0.weightGrams) }) else {
             throw MilkError.message("Weights must be between 0 and 100,000 grams.")
@@ -156,8 +181,8 @@ final class Database {
         do {
             for entry in entries {
                 let statement = try prepare("""
-                INSERT INTO milk_records(recorded_at, local_day, timezone_id, session, goat_id, goat_name, weight_grams)
-                VALUES (?, ?, ?, ?, ?, ?, ?);
+                INSERT INTO milk_records(recorded_at, local_day, timezone_id, session, goat_id, goat_name, weight_grams, in_heat)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
                 """)
                 defer { sqlite3_finalize(statement) }
                 try bind(timestamp, to: 1, in: statement)
@@ -167,11 +192,21 @@ final class Database {
                 try bind(entry.goat.id, to: 5, in: statement)
                 try bind(entry.goat.name, to: 6, in: statement)
                 try bind(entry.weightGrams, to: 7, in: statement)
+                try bind(Int64(entry.inHeat ? 1 : 0), to: 8, in: statement)
                 let status = sqlite3_step(statement)
                 if status == SQLITE_CONSTRAINT && sqlite3_extended_errcode(handle) == 2067 {
                     throw MilkError.message("\(entry.goat.name) already has a \(session.rawValue) entry for \(day). Nothing was saved. To correct it, delete the old entry in History first.")
                 }
                 guard status == SQLITE_DONE else { throw databaseError() }
+            }
+            if hayReplaced {
+                let statement = try prepare("INSERT INTO hay_replacements(recorded_at, local_day, timezone_id, session) VALUES (?, ?, ?, ?);")
+                defer { sqlite3_finalize(statement) }
+                try bind(timestamp, to: 1, in: statement)
+                try bind(day, to: 2, in: statement)
+                try bind(timeZone.identifier, to: 3, in: statement)
+                try bind(session.rawValue, to: 4, in: statement)
+                try finish(statement)
             }
             try execute("COMMIT;")
         } catch {
@@ -181,7 +216,7 @@ final class Database {
     }
 
     func records() throws -> [MilkRecord] {
-        let statement = try prepare("SELECT id, recorded_at, goat_name, weight_grams, session FROM milk_records ORDER BY recorded_at DESC, id DESC;")
+        let statement = try prepare("SELECT id, recorded_at, goat_name, weight_grams, session, in_heat FROM milk_records ORDER BY recorded_at DESC, id DESC;")
         defer { sqlite3_finalize(statement) }
         let formatter = ISO8601DateFormatter()
         var result: [MilkRecord] = []
@@ -194,12 +229,37 @@ final class Database {
                 throw MilkError.message("A saved record could not be read.")
             }
             result.append(MilkRecord(id: sqlite3_column_int64(statement, 0), recordedAt: date,
-                                     goatName: string(statement, 2), weightGrams: sqlite3_column_int64(statement, 3), session: session))
+                                     goatName: string(statement, 2), weightGrams: sqlite3_column_int64(statement, 3), session: session,
+                                     inHeat: sqlite3_column_int(statement, 5) == 1))
         }
     }
 
     func deleteRecord(id: Int64) throws {
         let statement = try prepare("DELETE FROM milk_records WHERE id = ?;")
+        defer { sqlite3_finalize(statement) }
+        try bind(id, to: 1, in: statement)
+        try finish(statement)
+    }
+
+    func hayReplacements() throws -> [HayReplacement] {
+        let statement = try prepare("SELECT id, recorded_at, session FROM hay_replacements ORDER BY recorded_at DESC, id DESC;")
+        defer { sqlite3_finalize(statement) }
+        let formatter = ISO8601DateFormatter()
+        var result: [HayReplacement] = []
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { return result }
+            guard status == SQLITE_ROW else { throw databaseError() }
+            guard let date = formatter.date(from: string(statement, 1)),
+                  let session = MilkingSession(rawValue: string(statement, 2)) else {
+                throw MilkError.message("A saved hay replacement could not be read.")
+            }
+            result.append(HayReplacement(id: sqlite3_column_int64(statement, 0), recordedAt: date, session: session))
+        }
+    }
+
+    func deleteHayReplacement(id: Int64) throws {
+        let statement = try prepare("DELETE FROM hay_replacements WHERE id = ?;")
         defer { sqlite3_finalize(statement) }
         try bind(id, to: 1, in: statement)
         try finish(statement)

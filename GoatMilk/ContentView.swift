@@ -5,18 +5,22 @@ struct ContentView: View {
     let database: Database
     @State private var goats: [Goat] = []
     @State private var records: [MilkRecord] = []
+    @State private var hayReplacements: [HayReplacement] = []
     @State private var selectedTab = 0
     @State private var dataGoats: [Goat] = []
     @State private var selectedDataGoatID: Int64?
     @State private var dailyTotals: [DailyMilkTotal] = []
     @State private var newGoatName = ""
     @State private var weights: [Int64: String] = [:]
+    @State private var inHeat: [Int64: Bool] = [:]
+    @State private var hayReplaced = false
     @State private var date = Date()
     @State private var session = MilkingSession.current()
     @State private var errorMessage: String?
     @State private var confirmation: String?
     @State private var goatToRetire: Goat?
     @State private var recordToDelete: MilkRecord?
+    @State private var hayToDelete: HayReplacement?
     @FocusState private var focusedGoat: Int64?
 
     var body: some View {
@@ -39,11 +43,12 @@ struct ContentView: View {
                 perform {
                     try database.retireGoat(id: goat.id)
                     weights[goat.id] = nil
+                    inHeat[goat.id] = nil
                     try reload()
                 }
                 goatToRetire = nil
             }
-        } message: { Text("Saved milk records will stay in History. Any unsaved weight for this goat will be discarded.") }
+        } message: { Text("Saved milk records will stay in History. Any unsaved weight and heat selection for this goat will be discarded.") }
         .confirmationDialog("Delete this milk record?", isPresented: Binding(
             get: { recordToDelete != nil }, set: { if !$0 { recordToDelete = nil } }
         ), titleVisibility: .visible) {
@@ -53,6 +58,15 @@ struct ContentView: View {
                 recordToDelete = nil
             }
         } message: { Text("This cannot be undone. You can enter a replacement from the Milk tab.") }
+        .confirmationDialog("Delete this hay replacement?", isPresented: Binding(
+            get: { hayToDelete != nil }, set: { if !$0 { hayToDelete = nil } }
+        ), titleVisibility: .visible) {
+            Button("Delete hay replacement", role: .destructive) {
+                guard let event = hayToDelete else { return }
+                perform { try database.deleteHayReplacement(id: event.id); try reload() }
+                hayToDelete = nil
+            }
+        } message: { Text("This cannot be undone. Milk records will be kept.") }
     }
 
     private var entryView: some View {
@@ -72,22 +86,38 @@ struct ContentView: View {
                     }
                     Section {
                         ForEach(goats) { goat in
-                            HStack {
-                                Text(goat.name).frame(maxWidth: .infinity, alignment: .leading)
-                                TextField("0", text: Binding(
-                                    get: { weights[goat.id, default: ""] },
-                                    set: { weights[goat.id] = $0; confirmation = nil }
+                            VStack(alignment: .leading, spacing: 12) {
+                                HStack {
+                                    Text(goat.name).frame(maxWidth: .infinity, alignment: .leading)
+                                    TextField("0", text: Binding(
+                                        get: { weights[goat.id, default: ""] },
+                                        set: { weights[goat.id] = $0; confirmation = nil }
+                                    ))
+                                    .keyboardType(.numberPad)
+                                    .multilineTextAlignment(.trailing)
+                                    .frame(minWidth: 70, maxWidth: 120)
+                                    .focused($focusedGoat, equals: goat.id)
+                                    .accessibilityLabel("\(goat.name), milk weight in grams")
+                                    Text("g").foregroundStyle(.secondary)
+                                }
+                                Toggle("In heat", isOn: Binding(
+                                    get: { inHeat[goat.id, default: false] },
+                                    set: { inHeat[goat.id] = $0; confirmation = nil }
                                 ))
-                                .keyboardType(.numberPad)
-                                .multilineTextAlignment(.trailing)
-                                .frame(minWidth: 70, maxWidth: 120)
-                                .focused($focusedGoat, equals: goat.id)
-                                .accessibilityLabel("\(goat.name), milk weight in grams")
-                                Text("g").foregroundStyle(.secondary)
+                                .toggleStyle(CheckboxToggleStyle())
+                                .accessibilityLabel("\(goat.name), in heat")
                             }
                         }
                     } header: { Text("Milk weight · grams") }
-                    footer: { Text("Use whole grams (1,000 g = 1 kg). Blank skips a goat; entering 0 saves a zero yield.") }
+                    footer: { Text("Use whole grams (1,000 g = 1 kg). Blank skips a goat; entering 0 saves a zero yield. In heat is saved with that goat’s weight.") }
+                    Section {
+                        Toggle("Hay replaced", isOn: Binding(
+                            get: { hayReplaced },
+                            set: { hayReplaced = $0; confirmation = nil }
+                        ))
+                        .toggleStyle(CheckboxToggleStyle())
+                    } header: { Text("Whole herd") }
+                    footer: { Text("Records one hay replacement at the selected date and time when you save this milking. Enter at least one goat’s weight.") }
                     Section {
                         Button(action: save) {
                             Label("Save milking", systemImage: "checkmark.circle.fill")
@@ -155,10 +185,27 @@ struct ContentView: View {
                         }
                         Text("\(record.session.title) · \(record.recordedAt.formatted(date: .abbreviated, time: .shortened))")
                             .font(.subheadline).foregroundStyle(.secondary)
+                        if record.inHeat {
+                            Text("In heat").font(.subheadline)
+                        }
                     }
                     .padding(.vertical, 4)
                     .swipeActions(allowsFullSwipe: false) {
                         Button("Delete", role: .destructive) { recordToDelete = record }
+                    }
+                }
+                if !hayReplacements.isEmpty {
+                    Section("Hay replacements · whole herd") {
+                        ForEach(hayReplacements) { event in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Hay replaced").font(.headline)
+                                Text("\(event.session.title) · \(event.recordedAt.formatted(date: .abbreviated, time: .shortened))")
+                                    .font(.subheadline).foregroundStyle(.secondary)
+                            }
+                            .swipeActions(allowsFullSwipe: false) {
+                                Button("Delete", role: .destructive) { hayToDelete = event }
+                            }
+                        }
                     }
                 }
             }
@@ -273,12 +320,20 @@ struct ContentView: View {
         focusedGoat = nil
         perform {
             let entries = try goats.compactMap { goat -> MilkEntry? in
-                guard let grams = try WeightInput.parse(weights[goat.id, default: ""]) else { return nil }
-                return MilkEntry(goat: goat, weightGrams: grams)
+                guard let grams = try WeightInput.parse(weights[goat.id, default: ""]) else {
+                    if inHeat[goat.id, default: false] {
+                        throw MilkError.message("Enter a milk weight for \(goat.name) to save In heat, or uncheck it. Enter 0 only for a zero yield.")
+                    }
+                    return nil
+                }
+                return MilkEntry(goat: goat, weightGrams: grams, inHeat: inHeat[goat.id, default: false])
             }
-            try database.save(entries: entries, at: date, session: session)
+            try database.save(entries: entries, at: date, session: session, hayReplaced: hayReplaced)
             weights = [:] // Clear only after the transaction succeeds.
             confirmation = "Saved \(entries.count) \(entries.count == 1 ? "entry" : "entries") · \(entries.reduce(Int64(0)) { $0 + $1.weightGrams }.formatted()) g"
+            if hayReplaced { confirmation = (confirmation ?? "") + " · Hay replaced" }
+            inHeat = [:]
+            hayReplaced = false
             try reload()
         }
     }
@@ -286,6 +341,7 @@ struct ContentView: View {
     private func reload() throws {
         goats = try database.goats()
         records = try database.records()
+        hayReplacements = try database.hayReplacements()
         dataGoats = try database.goats(includeRetired: true)
         if !dataGoats.contains(where: { $0.id == selectedDataGoatID }) {
             selectedDataGoatID = dataGoats.first(where: \.isActive)?.id ?? dataGoats.first?.id
@@ -302,5 +358,25 @@ struct ContentView: View {
 
     private func perform(_ action: () throws -> Void) {
         do { try action() } catch { errorMessage = error.localizedDescription }
+    }
+}
+
+private struct CheckboxToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack {
+                Image(systemName: configuration.isOn ? "checkmark.square.fill" : "square")
+                    .font(.title2)
+                    .accessibilityHidden(true)
+                configuration.label
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(configuration.isOn ? "Checked" : "Unchecked")
+        .accessibilityAddTraits(configuration.isOn ? [.isSelected] : [])
     }
 }

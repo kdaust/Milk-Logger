@@ -14,7 +14,7 @@ The project has a shared scheme and generates its Info.plist through build setti
 
 1. Open **Goats**, enter a name, and tap **Add goat**. Repeat for each goat currently being milked.
 2. Open **Milk**, check the date/time and Morning/Evening selection, then enter each weight in **whole grams** (e.g. `1250` for 1.25 kg).
-3. Tap **Save milking**. Blank fields skip those goats; an explicit `0` records zero milk. Each weight must be between 0 and 100,000 grams.
+3. Check **In heat** under any affected goat and **Hay replaced** under **Whole herd** if applicable, then tap **Save milking**. Blank fields skip those goats; an explicit `0` records zero milk. Each weight must be between 0 and 100,000 grams. A checked heat observation requires that goat’s weight. Hay is saved once for the herd alongside a milking with at least one weight.
 4. Open **History** to see saved entries, newest first. Swipe and confirm deletion to remove an incorrect entry, then re-enter it with its original date/session.
 
 Only one record per goat, local calendar day, and session is allowed. If any entered goat already has a record for that session, the entire save is rejected and the form stays filled in. To add a previously skipped goat, enter only that goat’s weight.
@@ -53,8 +53,37 @@ The `goats` table stores a name, normalized name key, and active/retired status.
 | `goat_id` | Reference to the goat. |
 | `goat_name` | Name snapshot for this record. |
 | `weight_grams` | Integer milk weight, explicitly in grams. |
+| `in_heat` | `0` (unchecked) or `1` (checked), specific to this goat and milking. |
 
 History displays timestamps in the device’s current timezone. Duplicate detection uses the saved local day. The schema version is recorded in `PRAGMA user_version` for future migrations.
+
+### SQLite migration plan: version 1 → 2
+
+The app automatically runs `Database.migrationToVersion2` when opening a version 1 database. Fresh installs create the original schema and then run the same migration. Version 2 databases skip it; newer versions are rejected rather than modified.
+
+```sql
+BEGIN IMMEDIATE;
+ALTER TABLE milk_records
+  ADD COLUMN in_heat INTEGER NOT NULL DEFAULT 0 CHECK(in_heat IN (0, 1));
+CREATE TABLE hay_replacements (
+  id INTEGER PRIMARY KEY,
+  recorded_at TEXT NOT NULL,
+  local_day TEXT NOT NULL,
+  timezone_id TEXT NOT NULL,
+  session TEXT NOT NULL CHECK(session IN ('morning', 'evening'))
+);
+CREATE INDEX hay_replacement_dates ON hay_replacements(recorded_at DESC);
+PRAGMA user_version = 2;
+COMMIT;
+```
+
+Existing goats and milk records stay intact. Existing milk records get `in_heat = 0`, meaning no heat observation was recorded, not proof the goat was not in heat. There are no inferred historical hay events. Migration failures roll back the version 2 changes and present the existing startup error screen.
+
+Each checked **Hay replaced** save inserts one herd event, with the form’s selected timestamp, local day, timezone, and session; it has no goat foreign key. An unchecked box inserts nothing. Multiple replacements in the same day/session are allowed. When adding a skipped goat later, leave Hay replaced unchecked unless hay was replaced again.
+
+Milk rows (including heat flags) and the optional hay event commit in one transaction. A duplicate or failed write rolls everything back and leaves the form filled in. Successful saves clear weights and both types of checkbox. History shows heat on milk records and hay in a separate herd section. Deleting a milk record does not delete a hay event; hay events have their own confirmed delete action.
+
+Before shipping, back up a copy of an existing database, open it with the new app, verify the old rows and version 2, then save/reopen a milking with mixed heat flags and one hay event. Check an unchecked save and a duplicate rejection, and confirm independent history deletion. The storage tests cover migration, reopening, persistence, and rollback; simulator checks should also verify checkbox accessibility and that failed saves retain the form.
 
 ## Validation
 
