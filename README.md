@@ -49,6 +49,8 @@ The Data tab also compares **Morning vs evening** with a violin chart using all 
 
 Simulator checks for this chart: add multiple goats, including a retired goat with a reused name; verify colors match the production chart and sessions stay separate. Check empty sessions, one or two records, repeated identical weights, zero yields, and a varied distribution. Save/delete a milking and confirm the distribution and count refresh. Check large text and VoiceOver.
 
+Chart updates publish the selected goats, daily totals, and distributions as one snapshot. Color categories and violin positions use that same snapshot. Both Charts views are recreated without animation when the snapshot changes, avoiding stale category/series state during selection changes. If loading fails, the previous selection and chart data remain together. Regression checks: repeatedly switch between goats with a full violin, sparse dots, and no data; add/remove goats; switch away from and back to Data; save/delete records while multiple goats are selected.
+
 ## Stored data
 
 The database lives inside the app sandbox at **Application Support/GoatMilk/milk.sqlite**. It persists across app launches; deleting the app removes its local data. The draft has no cloud sync, export, or backup UI, and unsaved form values do not survive app termination.

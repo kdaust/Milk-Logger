@@ -16,6 +16,14 @@ struct DailyMilkTotal: Identifiable {
     var chartWeightGrams: Int64 { isEstimated ? weightGrams * 2 : weightGrams }
 }
 
+/// Publish categories and their marks together so Charts never sees mismatched data.
+struct MilkChartSnapshot {
+    let revision = UUID()
+    var goats: [Goat] = []
+    var dailyTotals: [Int64: [DailyMilkTotal]] = [:]
+    var distributions: [MilkDistribution] = []
+}
+
 enum MilkingSession: String, CaseIterable, Identifiable {
     case morning, evening
     var id: String { rawValue }

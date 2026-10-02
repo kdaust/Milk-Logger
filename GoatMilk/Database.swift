@@ -141,6 +141,16 @@ final class Database {
         }
     }
 
+    func chartSnapshot(for goats: [Goat]) throws -> MilkChartSnapshot {
+        var snapshot = MilkChartSnapshot()
+        snapshot.goats = goats
+        for goat in goats {
+            snapshot.dailyTotals[goat.id] = try dailyTotals(for: goat.id)
+            snapshot.distributions += try distributions(for: goat.id)
+        }
+        return snapshot
+    }
+
     func distributions(for goatID: Int64) throws -> [MilkDistribution] {
         let statement = try prepare("SELECT session, weight_grams FROM milk_records WHERE goat_id = ? ORDER BY weight_grams;")
         defer { sqlite3_finalize(statement) }

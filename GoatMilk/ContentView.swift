@@ -8,9 +8,7 @@ struct ContentView: View {
     @State private var hayReplacements: [HayReplacement] = []
     @State private var selectedTab = 0
     @State private var dataGoats: [Goat] = []
-    @State private var selectedDataGoatIDs: [Int64] = []
-    @State private var dailyTotalsByGoat: [Int64: [DailyMilkTotal]] = [:]
-    @State private var distributions: [MilkDistribution] = []
+    @State private var chartSnapshot = MilkChartSnapshot()
     @State private var newGoatName = ""
     @State private var weights: [Int64: String] = [:]
     @State private var inHeat: [Int64: Bool] = [:]
@@ -32,7 +30,6 @@ struct ContentView: View {
             dataView.tabItem { Label("Data", systemImage: "chart.xyaxis.line") }.tag(3)
         }
         .task { perform { try reload() } }
-        .onChange(of: selectedDataGoatIDs) { _ in perform { try reloadDailyTotals() } }
         .alert("Something needs attention", isPresented: Binding(
             get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
         )) { Button("OK", role: .cancel) {} } message: { Text(errorMessage ?? "") }
@@ -232,7 +229,9 @@ struct ContentView: View {
                                     set: { replacement in
                                         guard let index = selectedDataGoatIDs.firstIndex(of: selectedGoat.id),
                                               !selectedDataGoatIDs.contains(replacement) else { return }
-                                        selectedDataGoatIDs[index] = replacement
+                                        var selection = selectedDataGoatIDs
+                                        selection[index] = replacement
+                                        selectDataGoats(selection)
                                     }
                                 )) {
                                     ForEach(dataGoats.filter { $0.id == selectedGoat.id || !selectedDataGoatIDs.contains($0.id) }) { goat in
@@ -241,7 +240,7 @@ struct ContentView: View {
                                 }
                                 if selectedDataGoatIDs.count > 1 {
                                     Button {
-                                        selectedDataGoatIDs.removeAll { $0 == selectedGoat.id }
+                                        selectDataGoats(selectedDataGoatIDs.filter { $0 != selectedGoat.id })
                                     } label: {
                                         Image(systemName: "minus.circle")
                                             .frame(minWidth: 44, minHeight: 44)
@@ -253,7 +252,7 @@ struct ContentView: View {
                         }
                         Menu {
                             ForEach(remainingDataGoats) { goat in
-                                Button(dataGoatLabel(goat)) { selectedDataGoatIDs.append(goat.id) }
+                                Button(dataGoatLabel(goat)) { selectDataGoats(selectedDataGoatIDs + [goat.id]) }
                             }
                         } label: {
                             Label("Add a goat", systemImage: "plus.circle")
@@ -355,6 +354,8 @@ struct ContentView: View {
         .chartXAxisLabel("Date")
         .environment(\.timeZone, TimeZone(secondsFromGMT: 0)!)
         .environment(\.calendar, Calendar(identifier: .gregorian))
+        // Recreate Charts' category/series caches when a new snapshot is published.
+        .id(chartSnapshot.revision)
     }
 
     private var distributionChart: some View {
@@ -399,6 +400,7 @@ struct ContentView: View {
             }
         }
         .chartYAxisLabel("Milk (g)")
+        .id(chartSnapshot.revision)
     }
 
     private func distributionSummary(_ distribution: MilkDistribution) -> some View {
@@ -422,7 +424,7 @@ struct ContentView: View {
     }
 
     private func distributionGoatLabel(_ distribution: MilkDistribution) -> String {
-        dataGoats.first { $0.id == distribution.goatID }.map(dataGoatLabel) ?? "Goat #\(distribution.goatID)"
+        selectedDataGoats.first { $0.id == distribution.goatID }.map(dataGoatLabel) ?? "Goat #\(distribution.goatID)"
     }
 
     private var chartDateRange: ClosedRange<Date> {
@@ -433,7 +435,15 @@ struct ContentView: View {
     }
 
     private var selectedDataGoats: [Goat] {
-        selectedDataGoatIDs.compactMap { id in dataGoats.first { $0.id == id } }
+        chartSnapshot.goats
+    }
+
+    private var selectedDataGoatIDs: [Int64] { chartSnapshot.goats.map(\.id) }
+    private var dailyTotalsByGoat: [Int64: [DailyMilkTotal]] { chartSnapshot.dailyTotals }
+    private var distributions: [MilkDistribution] { chartSnapshot.distributions }
+
+    private func selectDataGoats(_ ids: [Int64]) {
+        perform { try reloadCharts(selection: ids) }
     }
 
     private var remainingDataGoats: [Goat] {
@@ -483,27 +493,24 @@ struct ContentView: View {
         records = try database.records()
         hayReplacements = try database.hayReplacements()
         dataGoats = try database.goats(includeRetired: true)
-        selectedDataGoatIDs.removeAll { id in !dataGoats.contains { $0.id == id } }
-        if selectedDataGoatIDs.isEmpty, let first = dataGoats.first(where: \.isActive) ?? dataGoats.first {
-            selectedDataGoatIDs = [first.id]
-        }
-        try reloadDailyTotals()
+        try reloadCharts(selection: selectedDataGoatIDs)
     }
 
-    private func reloadDailyTotals() throws {
-        var loaded: [Int64: [DailyMilkTotal]] = [:]
-        var loadedDistributions: [MilkDistribution] = []
-        do {
-            for id in selectedDataGoatIDs {
-                loaded[id] = try database.dailyTotals(for: id)
-                loadedDistributions += try database.distributions(for: id)
-            }
-            dailyTotalsByGoat = loaded
-            distributions = loadedDistributions
-        } catch {
-            dailyTotalsByGoat = [:]
-            distributions = []
-            throw error
+    private func reloadCharts(selection: [Int64]) throws {
+        var seen = Set<Int64>()
+        var selected = selection.compactMap { id -> Goat? in
+            guard seen.insert(id).inserted else { return nil }
+            return dataGoats.first { $0.id == id }
+        }
+        if selected.isEmpty, let first = dataGoats.first(where: \.isActive) ?? dataGoats.first {
+            selected = [first]
+        }
+        // Load before changing selection. A failed query keeps the last complete snapshot.
+        let loaded = try database.chartSnapshot(for: selected)
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            chartSnapshot = loaded
         }
     }
 
