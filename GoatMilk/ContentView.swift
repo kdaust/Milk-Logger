@@ -309,10 +309,9 @@ struct ContentView: View {
         Chart {
             ForEach(selectedDataGoats) { goat in
                 ForEach(dailyTotalsByGoat[goat.id, default: []]) { total in
-                    LineMark(x: .value("Date", total.date), y: .value("Milk (g)", total.chartWeightGrams),
-                             series: .value("Goat ID", String(goat.id)))
+                    LineMark(x: .value("Date", total.date), y: .value("Milk (g)", total.chartWeightGrams), series: .value("Goat ID", String(goat.id)))
                         .foregroundStyle(by: .value("Goat", dataGoatLabel(goat)))
-                        .interpolationMethod(.linear)
+                        .interpolationMethod(.catmullRom)
                     PointMark(x: .value("Date", total.date), y: .value("Milk (g)", total.chartWeightGrams))
                         .foregroundStyle(by: .value("Goat", dataGoatLabel(goat)))
                         .accessibilityLabel("\(dataGoatLabel(goat)), \(total.date.formatted(chartDateFormat))")
@@ -434,7 +433,7 @@ private struct CheckboxToggleStyle: ToggleStyle {
                     .accessibilityHidden(true)
                 configuration.label
             }
-            .frame(minHeight: 44)
+            .frame(minHeight: 50)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
