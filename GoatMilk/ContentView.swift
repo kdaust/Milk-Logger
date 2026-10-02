@@ -8,8 +8,8 @@ struct ContentView: View {
     @State private var hayReplacements: [HayReplacement] = []
     @State private var selectedTab = 0
     @State private var dataGoats: [Goat] = []
-    @State private var selectedDataGoatID: Int64?
-    @State private var dailyTotals: [DailyMilkTotal] = []
+    @State private var selectedDataGoatIDs: [Int64] = []
+    @State private var dailyTotalsByGoat: [Int64: [DailyMilkTotal]] = [:]
     @State private var newGoatName = ""
     @State private var weights: [Int64: String] = [:]
     @State private var inHeat: [Int64: Bool] = [:]
@@ -31,7 +31,7 @@ struct ContentView: View {
             dataView.tabItem { Label("Data", systemImage: "chart.xyaxis.line") }.tag(3)
         }
         .task { perform { try reload() } }
-        .onChange(of: selectedDataGoatID) { _ in perform { try reloadDailyTotals() } }
+        .onChange(of: selectedDataGoatIDs) { _ in perform { try reloadDailyTotals() } }
         .alert("Something needs attention", isPresented: Binding(
             get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
         )) { Button("OK", role: .cancel) {} } message: { Text(errorMessage ?? "") }
@@ -223,18 +223,46 @@ struct ContentView: View {
                         Button("Set up your goats") { selectedTab = 2 }
                     }
                 } else {
-                    Section {
-                        Picker("Goat", selection: $selectedDataGoatID) {
-                            ForEach(dataGoats) { goat in
-                                Text(goat.isActive ? goat.name : "\(goat.name) (retired #\(goat.id))")
-                                    .tag(Optional(goat.id))
+                    Section("Goats on chart") {
+                        ForEach(selectedDataGoats) { selectedGoat in
+                            HStack {
+                                Picker("Goat", selection: Binding(
+                                    get: { selectedGoat.id },
+                                    set: { replacement in
+                                        guard let index = selectedDataGoatIDs.firstIndex(of: selectedGoat.id),
+                                              !selectedDataGoatIDs.contains(replacement) else { return }
+                                        selectedDataGoatIDs[index] = replacement
+                                    }
+                                )) {
+                                    ForEach(dataGoats.filter { $0.id == selectedGoat.id || !selectedDataGoatIDs.contains($0.id) }) { goat in
+                                        Text(dataGoatLabel(goat)).tag(goat.id)
+                                    }
+                                }
+                                if selectedDataGoatIDs.count > 1 {
+                                    Button {
+                                        selectedDataGoatIDs.removeAll { $0 == selectedGoat.id }
+                                    } label: {
+                                        Image(systemName: "minus.circle")
+                                            .frame(minWidth: 44, minHeight: 44)
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .accessibilityLabel("Remove \(dataGoatLabel(selectedGoat)) from chart")
+                                }
                             }
                         }
+                        Menu {
+                            ForEach(remainingDataGoats) { goat in
+                                Button(dataGoatLabel(goat)) { selectedDataGoatIDs.append(goat.id) }
+                            }
+                        } label: {
+                            Label("Add a goat", systemImage: "plus.circle")
+                        }
+                        .disabled(remainingDataGoats.isEmpty)
                     }
-                    if dailyTotals.isEmpty {
+                    if chartTotals.isEmpty {
                         Section {
-                            Text("No milk recorded for this goat yet.").font(.headline)
-                            Text("Save a milking in the Milk tab to see its production over time.")
+                            Text("No milk recorded for the selected goats yet.").font(.headline)
+                            Text("Save a milking in the Milk tab to see production over time.")
                                 .foregroundStyle(.secondary)
                         }
                     } else {
@@ -244,18 +272,23 @@ struct ContentView: View {
                                 .padding(.vertical, 12)
                         } header: { Text("Daily milk production · grams") }
                         footer: {
-                            Text("Morning and evening weights are added together. A day with one entry is a partial total. Dots show recorded days; connecting lines do not imply measurements on missing days.")
+                            Text("Morning and evening weights are added together. When only one session is recorded, its weight is doubled to estimate the full day. Dots show recorded days; connecting lines do not imply measurements on missing days.")
                         }
-                        Section("Daily totals") {
-                            ForEach(dailyTotals.reversed()) { total in
+                    }
+                    ForEach(selectedDataGoats) { goat in
+                        Section("Daily totals · \(dataGoatLabel(goat))") {
+                            if dailyTotalsByGoat[goat.id, default: []].isEmpty {
+                                Text("No milk recorded for this goat yet.").foregroundStyle(.secondary)
+                            }
+                            ForEach(dailyTotalsByGoat[goat.id, default: []].reversed()) { total in
                                 HStack {
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(total.date, format: chartDateFormat)
-                                        Text(total.sessionCount == 2 ? "Morning + evening" : "1 session · partial total")
+                                        Text(total.isEstimated ? "Estimated · 2 × \(total.weightGrams.formatted()) g recorded" : "Morning + evening")
                                             .font(.caption).foregroundStyle(.secondary)
                                     }
                                     Spacer()
-                                    Text("\(total.weightGrams.formatted()) g").monospacedDigit()
+                                    Text("\(total.chartWeightGrams.formatted()) g").monospacedDigit()
                                 }
                             }
                         }
@@ -273,16 +306,22 @@ struct ContentView: View {
     }
 
     private var productionChart: some View {
-        Chart(dailyTotals) { total in
-            LineMark(x: .value("Date", total.date), y: .value("Milk (g)", total.weightGrams))
-                .foregroundStyle(.teal)
-                .interpolationMethod(.linear)
-            PointMark(x: .value("Date", total.date), y: .value("Milk (g)", total.weightGrams))
-                .foregroundStyle(.teal)
-                .accessibilityLabel(total.date.formatted(chartDateFormat))
-                .accessibilityValue("\(total.weightGrams) grams, \(total.sessionCount) sessions")
+        Chart {
+            ForEach(selectedDataGoats) { goat in
+                ForEach(dailyTotalsByGoat[goat.id, default: []]) { total in
+                    LineMark(x: .value("Date", total.date), y: .value("Milk (g)", total.chartWeightGrams),
+                             series: .value("Goat ID", String(goat.id)))
+                        .foregroundStyle(by: .value("Goat", dataGoatLabel(goat)))
+                        .interpolationMethod(.linear)
+                    PointMark(x: .value("Date", total.date), y: .value("Milk (g)", total.chartWeightGrams))
+                        .foregroundStyle(by: .value("Goat", dataGoatLabel(goat)))
+                        .accessibilityLabel("\(dataGoatLabel(goat)), \(total.date.formatted(chartDateFormat))")
+                        .accessibilityValue("\(total.chartWeightGrams) grams, \(total.isEstimated ? "estimated from one session" : "morning and evening recorded")")
+                }
+            }
         }
-        .chartYScale(domain: 0...max(1, Double(dailyTotals.map(\.weightGrams).max() ?? 0) * 1.1))
+        .chartLegend(position: .bottom)
+        .chartYScale(domain: 0...max(1, Double(chartTotals.map(\.chartWeightGrams).max() ?? 0) * 1.1))
         .chartXScale(domain: chartDateRange)
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 4)) { value in
@@ -302,10 +341,26 @@ struct ContentView: View {
     }
 
     private var chartDateRange: ClosedRange<Date> {
-        let first = dailyTotals.first?.date ?? Date()
-        let last = dailyTotals.last?.date ?? first
+        let first = chartTotals.map(\.date).min() ?? Date()
+        let last = chartTotals.map(\.date).max() ?? first
         // A single recorded day still needs a nonzero axis range and a visible dot.
         return first.addingTimeInterval(-43_200)...last.addingTimeInterval(43_200)
+    }
+
+    private var selectedDataGoats: [Goat] {
+        selectedDataGoatIDs.compactMap { id in dataGoats.first { $0.id == id } }
+    }
+
+    private var remainingDataGoats: [Goat] {
+        dataGoats.filter { !selectedDataGoatIDs.contains($0.id) }
+    }
+
+    private var chartTotals: [DailyMilkTotal] {
+        selectedDataGoatIDs.flatMap { dailyTotalsByGoat[$0, default: []] }
+    }
+
+    private func dataGoatLabel(_ goat: Goat) -> String {
+        goat.isActive ? goat.name : "\(goat.name) (retired #\(goat.id))"
     }
 
     private func addGoat() {
@@ -343,16 +398,23 @@ struct ContentView: View {
         records = try database.records()
         hayReplacements = try database.hayReplacements()
         dataGoats = try database.goats(includeRetired: true)
-        if !dataGoats.contains(where: { $0.id == selectedDataGoatID }) {
-            selectedDataGoatID = dataGoats.first(where: \.isActive)?.id ?? dataGoats.first?.id
+        selectedDataGoatIDs.removeAll { id in !dataGoats.contains { $0.id == id } }
+        if selectedDataGoatIDs.isEmpty, let first = dataGoats.first(where: \.isActive) ?? dataGoats.first {
+            selectedDataGoatIDs = [first.id]
         }
         try reloadDailyTotals()
     }
 
     private func reloadDailyTotals() throws {
-        dailyTotals = []
-        if let selectedDataGoatID {
-            dailyTotals = try database.dailyTotals(for: selectedDataGoatID)
+        var loaded: [Int64: [DailyMilkTotal]] = [:]
+        do {
+            for id in selectedDataGoatIDs {
+                loaded[id] = try database.dailyTotals(for: id)
+            }
+            dailyTotalsByGoat = loaded
+        } catch {
+            dailyTotalsByGoat = [:]
+            throw error
         }
     }
 

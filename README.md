@@ -37,6 +37,14 @@ The central flow is **text field → `WeightInput.parse` → `MilkEntry` → `Da
 
 For this small draft, database operations run synchronously on the UI thread and History loads all records. A larger herd or years of records would benefit from a background database actor and paginated history.
 
+## Comparing goats in Data
+
+The Data tab starts with one goat selected. Use **Add a goat** to choose from goats not already on the chart. Each goat has a separate colored line and a legend label. You can change a selected goat with its picker or remove additional goats with the minus button. Retired goats remain available for comparison, and goats with no records show an empty-state message in their daily totals section.
+
+When a day has only a morning or evening record, the chart doubles that weight as an estimate of the full day. With both sessions recorded, it uses their actual sum. The daily totals list labels estimates and shows the original recorded amount. Stored milk weights and History are unchanged; no SQLite migration is needed. Selections last for the current app session.
+
+On a simulator, compare two goats with different date ranges; add and remove goats; check that the add menu excludes selected goats and disables when all are selected. Verify a single-session day is doubled, then add its second session and confirm the chart switches to the actual sum. Check a zero yield, a goat without records, retired goats, large text, and VoiceOver.
+
 ## Stored data
 
 The database lives inside the app sandbox at **Application Support/GoatMilk/milk.sqlite**. It persists across app launches; deleting the app removes its local data. The draft has no cloud sync, export, or backup UI, and unsaved form values do not survive app termination.

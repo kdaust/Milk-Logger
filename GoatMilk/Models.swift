@@ -12,6 +12,8 @@ struct DailyMilkTotal: Identifiable {
     let weightGrams: Int64
     let sessionCount: Int
     var id: String { localDay }
+    var isEstimated: Bool { sessionCount == 1 }
+    var chartWeightGrams: Int64 { isEstimated ? weightGrams * 2 : weightGrams }
 }
 
 enum MilkingSession: String, CaseIterable, Identifiable {
