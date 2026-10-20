@@ -128,7 +128,7 @@ struct ContentView: View {
                     Section { Label(confirmation, systemImage: "checkmark.circle").foregroundStyle(.green) }
                 }
             }
-            .navigationTitle("Data Entry").foregroundStyle(Color(.purple))
+            .navigationTitle("Data Entry").foregroundStyle(.purple)
             .toolbar {
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
@@ -270,10 +270,7 @@ struct ContentView: View {
                             productionChart
                                 .frame(height: 260)
                                 .padding(.vertical, 12)
-                        } header: { Text("Daily milk production · grams") }
-                        footer: {
-                            Text("Morning and evening weights are added together. When only one session is recorded, its weight is doubled to estimate the full day. Dots show recorded days; connecting lines do not imply measurements on missing days.")
-                        }
+                        } header: { Text("Daily milk production") }
                     }
                     Section {
                         if distributions.allSatisfy({ $0.weights.isEmpty }) {
@@ -284,12 +281,10 @@ struct ContentView: View {
                                 .frame(height: 280)
                                 .padding(.vertical, 12)
                         }
-                        ForEach(distributions) { distribution in
-                            distributionSummary(distribution)
-                        }
-                    } header: { Text("Morning vs evening · grams") }
+
+                    } header: { Text("Morning vs Evening") }
                     footer: {
-                        Text("All recorded milkings for the selected goats. Wider parts show more common weights; each violin has equal maximum width. Dots mark medians. Fewer than three records, or identical weights, show individual weights instead of a violin. Missing sessions are omitted; daily estimates are not used.")
+                        Text("Violin plot showing the distribution of morning and evening milk weights.")
                     }
                     ForEach(selectedDataGoats) { goat in
                         Section("Daily totals · \(dataGoatLabel(goat))") {
