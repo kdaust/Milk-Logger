@@ -19,7 +19,7 @@ The project has a shared scheme and generates its Info.plist through build setti
 
 Only one record per goat, local calendar day, and session is allowed. If any entered goat already has a record for that session, the entire save is rejected and the form stays filled in. To add a previously skipped goat, enter only that goat’s weight.
 
-The initial session is chosen from the current hour (before noon = morning). You can override it independently of the time. Tap **Now** to refresh the date/time and session when beginning another milking. The recorded timestamp is the time selected on the form, not the moment Save is pressed.
+The initial session is chosen from the current hour (before noon = morning). Date/time and session refresh whenever you return to the Milk tab or the app becomes active (including returning from the background). Entered weights and checkboxes are kept. You can override the time/session while staying on the form, or tap **Now**. The recorded timestamp is the time selected on the form, not the moment Save is pressed.
 
 Swipe a goat in **Goats** and choose **Retire** to remove it from future entry forms while keeping its history. Adding the same name after retirement creates a new goat identity; this draft does not have a restore or rename screen.
 
@@ -41,7 +41,13 @@ For this small draft, database operations run synchronously on the UI thread and
 
 The Data tab starts with one goat selected. Use **Add a goat** to choose from goats not already on the chart. Each goat has a separate colored line and a legend label. You can change a selected goat with its picker or remove additional goats with the minus button. Retired goats remain available for comparison, and goats with no records show an empty-state message in their daily totals section.
 
-When a day has only a morning or evening record, the chart doubles that weight as an estimate of the full day. With both sessions recorded, it uses their actual sum. The daily totals list labels estimates and shows the original recorded amount. Stored milk weights and History are unchanged; no SQLite migration is needed. Selections last for the current app session.
+When a day has only a morning or evening record and two milkings were scheduled, the chart doubles that weight as a full-day estimate. Once-daily goats use the recorded weight. With both sessions recorded, it always uses their actual sum. The daily totals list labels estimates and shows the original recorded amount. Stored weights and History are unchanged. Selections last for the current app session.
+
+Choose **Once** or **Twice** when adding a goat. Tap an existing goat in **Goats** to change its frequency and choose **Effective from** (today by default). Set Luna to Once with the day her schedule changed. Earlier days retain their old schedule; subsequent saved schedule changes still apply. The setting affects daily graph estimates and heat markers, not which sessions may be entered or the violin chart's raw weights.
+
+🔥 appears above a goat's daily point only when both morning and evening records are marked in heat on a twice-daily day. A missing session or one unchecked heat box suppresses the marker. On once-daily days, a recorded heat observation qualifies. 🍃 appears once per hay-replacement day in a separate row above the lines, within the displayed date range; it belongs to the herd. The graph uses saved local calendar days, so these markers summarize days rather than exact event times.
+
+**Export all data as CSV** in Data opens **Share CSV** and **Save to Files** actions. It includes every milk record, including retired goats, regardless of chart selection, and every hay replacement. Columns are `goat_name,date,time,weight,in_heat,hay_replaced`. Weight is actual grams (never a daily estimate); flags are `0`/`1`; date is the saved local day and time includes its UTC offset. Herd hay events are separate rows with blank goat name and weight, `in_heat=0`, and `hay_replaced=1`; milk rows have `hay_replaced=0`. This preserves independent hay events even after a milk record is deleted. Names containing commas, quotes or newlines are CSV-escaped. Empty databases export the header. This is a measurement/event export, not a full database backup of goat settings and schedule history.
 
 On a simulator, compare two goats with different date ranges; add and remove goats; check that the add menu excludes selected goats and disables when all are selected. Verify a single-session day is doubled, then add its second session and confirm the chart switches to the actual sum. Check a zero yield, a goat without records, retired goats, large text, and VoiceOver.
 
@@ -73,7 +79,7 @@ History displays timestamps in the device’s current timezone. Duplicate detect
 
 ### SQLite migration plan: version 1 → 2
 
-The app automatically runs `Database.migrationToVersion2` when opening a version 1 database. Fresh installs create the original schema and then run the same migration. Version 2 databases skip it; newer versions are rejected rather than modified.
+The app runs `Database.migrationToVersion2` when opening a version 1 database, then continues to version 3 below. Fresh installs follow the same path. Version 2 databases skip this step. Databases newer than version 3 are rejected rather than modified.
 
 ```sql
 BEGIN IMMEDIATE;
@@ -100,6 +106,12 @@ Milk rows (including heat flags) and the optional hay event commit in one transa
 Before shipping, back up a copy of an existing database, open it with the new app, verify the old rows and version 2, then save/reopen a milking with mixed heat flags and one hay event. Check an unchecked save and a duplicate rejection, and confirm independent history deletion. The storage tests cover migration, reopening, persistence, and rollback; simulator checks should also verify checkbox accessibility and that failed saves retain the form.
 
 ## Validation
+
+### SQLite version 3: milking schedules
+
+The automatic transactional migration adds `milking_schedules(goat_id, effective_day, milkings_per_day)`, with primary key `(goat_id, effective_day)`, a goat foreign key, and a constraint allowing 1 or 2 milkings. Existing goats receive a baseline of twice daily (`0001-01-01`); existing milk/hay rows are preserved. New goats receive the chosen baseline. Edits insert or replace the schedule for the selected effective date. Daily totals use the latest schedule on or before the recorded local day. A failed migration rolls back; the version becomes 3 only after success.
+
+Additional simulator checks: export and share/save CSV with retired goats and hay-only rows; cancel sharing/export; add a once-daily goat; change Luna's schedule from a past date; verify older estimates stay doubled while later single-session totals do not. Check the heat cases (missing evening, one checked session, both checked, once-daily checked) and hay markers with multiple selected goats. Enter unsaved weights/checkboxes, switch tabs, then background/reopen the app and verify time/session refresh while inputs remain. Swift storage tests cover schedule boundaries, heat logic, and CSV escaping/timezones; Windows SQL checks do not replace simulator validation.
 
 On a Mac, run the storage tests from this folder:
 

@@ -27,7 +27,7 @@ final class Database {
             sqlite3_busy_timeout(handle, 3_000)
             try execute("PRAGMA foreign_keys = ON;")
             let version = try schemaVersion()
-            guard version <= 2 else {
+            guard version <= 3 else {
                 throw MilkError.message("This database was created by a newer app version.")
             }
             if version == 0 { try execute(Self.schema) }
@@ -38,6 +38,10 @@ final class Database {
                     try? execute("ROLLBACK;")
                     throw error
                 }
+            }
+            if version < 3 {
+                do { try execute(Self.migrationToVersion3) }
+                catch { try? execute("ROLLBACK;"); throw error }
             }
         } catch {
             sqlite3_close(handle)
@@ -97,24 +101,55 @@ final class Database {
     COMMIT;
     """
 
+    static let migrationToVersion3 = """
+    BEGIN IMMEDIATE;
+    CREATE TABLE milking_schedules (
+        goat_id INTEGER NOT NULL REFERENCES goats(id),
+        effective_day TEXT NOT NULL,
+        milkings_per_day INTEGER NOT NULL CHECK(milkings_per_day IN (1, 2)),
+        PRIMARY KEY(goat_id, effective_day)
+    );
+    INSERT INTO milking_schedules SELECT id, '0001-01-01', 2 FROM goats;
+    PRAGMA user_version = 3;
+    COMMIT;
+    """
+
+    static func localDay(_ date: Date, timeZone: TimeZone = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
     func goats(includeRetired: Bool = false) throws -> [Goat] {
-        let statement = try prepare("SELECT id, name, active FROM goats WHERE active = 1 OR ? = 1 ORDER BY name COLLATE NOCASE, id;")
+        let statement = try prepare("""
+        SELECT id, name, active, COALESCE((SELECT milkings_per_day FROM milking_schedules
+        WHERE goat_id = goats.id AND effective_day <= ? ORDER BY effective_day DESC LIMIT 1), 2)
+        FROM goats WHERE active = 1 OR ? = 1 ORDER BY name COLLATE NOCASE, id;
+        """)
         defer { sqlite3_finalize(statement) }
-        try bind(Int64(includeRetired ? 1 : 0), to: 1, in: statement)
+        try bind(Self.localDay(Date()), to: 1, in: statement)
+        try bind(Int64(includeRetired ? 1 : 0), to: 2, in: statement)
         var result: [Goat] = []
         while true {
             let status = sqlite3_step(statement)
             if status == SQLITE_DONE { return result }
             guard status == SQLITE_ROW else { throw databaseError() }
             result.append(Goat(id: sqlite3_column_int64(statement, 0), name: string(statement, 1),
-                               isActive: sqlite3_column_int(statement, 2) == 1))
+                               isActive: sqlite3_column_int(statement, 2) == 1,
+                               milkingsPerDay: Int(sqlite3_column_int(statement, 3))))
         }
     }
 
     /// Use saved local days and stable goat IDs, not names or UTC timestamp dates.
     func dailyTotals(for goatID: Int64) throws -> [DailyMilkTotal] {
         let statement = try prepare("""
-        SELECT local_day, SUM(weight_grams), COUNT(*)
+        SELECT local_day, SUM(weight_grams), COUNT(*), MAX(in_heat),
+        COALESCE((SELECT milkings_per_day FROM milking_schedules
+        WHERE goat_id = milk_records.goat_id AND effective_day <= milk_records.local_day
+        ORDER BY effective_day DESC LIMIT 1), 2), MIN(in_heat)
         FROM milk_records WHERE goat_id = ?
         GROUP BY local_day ORDER BY local_day;
         """)
@@ -137,13 +172,25 @@ final class Database {
             }
             result.append(DailyMilkTotal(localDay: day, date: date,
                                          weightGrams: sqlite3_column_int64(statement, 1),
-                                         sessionCount: Int(sqlite3_column_int(statement, 2))))
+                                         sessionCount: Int(sqlite3_column_int(statement, 2)),
+                                         expectedMilkings: Int(sqlite3_column_int(statement, 4)),
+                                         inHeat: sqlite3_column_int(statement, 4) == 1
+                                            ? sqlite3_column_int(statement, 3) == 1
+                                            : sqlite3_column_int(statement, 2) == 2 && sqlite3_column_int(statement, 5) == 1))
         }
     }
 
     func chartSnapshot(for goats: [Goat]) throws -> MilkChartSnapshot {
         var snapshot = MilkChartSnapshot()
         snapshot.goats = goats
+        let hay = try prepare("SELECT DISTINCT local_day FROM hay_replacements ORDER BY local_day;")
+        defer { sqlite3_finalize(hay) }
+        while true {
+            let status = sqlite3_step(hay)
+            if status == SQLITE_DONE { break }
+            guard status == SQLITE_ROW else { throw databaseError() }
+            snapshot.hayDays.append(string(hay, 0))
+        }
         for goat in goats {
             snapshot.dailyTotals[goat.id] = try dailyTotals(for: goat.id)
             snapshot.distributions += try distributions(for: goat.id)
@@ -170,7 +217,8 @@ final class Database {
         }
     }
 
-    func addGoat(name: String) throws {
+    func addGoat(name: String, milkingsPerDay: Int = 2) throws {
+        guard (1...2).contains(milkingsPerDay) else { throw MilkError.message("Choose one or two milkings per day.") }
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name.count <= 60 else {
             throw MilkError.message("Give your goat a name between 1 and 60 characters.")
@@ -179,11 +227,58 @@ final class Database {
         defer { sqlite3_finalize(statement) }
         try bind(name, to: 1, in: statement)
         try bind(name.precomposedStringWithCanonicalMapping.lowercased(), to: 2, in: statement)
-        let status = sqlite3_step(statement)
-        if status == SQLITE_CONSTRAINT {
-            throw MilkError.message("An active goat already has that name.")
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_CONSTRAINT {
+                throw MilkError.message("An active goat already has that name.")
+            }
+            guard status == SQLITE_DONE else { throw databaseError() }
+            try setMilkingSchedule(goatID: sqlite3_last_insert_rowid(handle), milkingsPerDay: milkingsPerDay, effectiveDay: "0001-01-01")
+            try execute("COMMIT;")
+        } catch { try? execute("ROLLBACK;"); throw error }
+    }
+
+    func setMilkingSchedule(goatID: Int64, milkingsPerDay: Int, effectiveDay: String) throws {
+        guard (1...2).contains(milkingsPerDay) else { throw MilkError.message("Choose one or two milkings per day.") }
+        let statement = try prepare("""
+        INSERT INTO milking_schedules(goat_id, effective_day, milkings_per_day) VALUES (?, ?, ?)
+        ON CONFLICT(goat_id, effective_day) DO UPDATE SET milkings_per_day = excluded.milkings_per_day;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(goatID, to: 1, in: statement)
+        try bind(effectiveDay, to: 2, in: statement)
+        try bind(Int64(milkingsPerDay), to: 3, in: statement)
+        try finish(statement)
+    }
+
+    /// Herd events are separate rows, so exports never multiply hay replacements by goat count.
+    func exportCSV() throws -> String {
+        let statement = try prepare("""
+        SELECT goat_name, recorded_at, local_day, timezone_id, CAST(weight_grams AS TEXT), in_heat, 0
+        FROM milk_records
+        UNION ALL
+        SELECT '', recorded_at, local_day, timezone_id, '', 0, 1 FROM hay_replacements
+        ORDER BY 2, 1;
+        """)
+        defer { sqlite3_finalize(statement) }
+        let iso = ISO8601DateFormatter()
+        let time = DateFormatter()
+        time.calendar = Calendar(identifier: .gregorian)
+        time.locale = Locale(identifier: "en_US_POSIX")
+        time.dateFormat = "HH:mm:ssXXXXX"
+        var csv = "goat_name,date,time,weight,in_heat,hay_replaced\r\n"
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { return csv }
+            guard status == SQLITE_ROW else { throw databaseError() }
+            guard let date = iso.date(from: string(statement, 1)), let zone = TimeZone(identifier: string(statement, 3)) else {
+                throw MilkError.message("A saved timestamp or timezone could not be exported.")
+            }
+            time.timeZone = zone
+            csv += CSVExport.row([string(statement, 0), string(statement, 2), time.string(from: date),
+                                  string(statement, 4), string(statement, 5), string(statement, 6)])
         }
-        guard status == SQLITE_DONE else { throw databaseError() }
     }
 
     func retireGoat(id: Int64) throws {

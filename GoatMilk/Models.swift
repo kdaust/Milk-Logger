@@ -4,6 +4,7 @@ struct Goat: Identifiable, Equatable {
     let id: Int64
     let name: String
     var isActive: Bool = true
+    var milkingsPerDay: Int = 2
 }
 
 struct DailyMilkTotal: Identifiable {
@@ -12,7 +13,9 @@ struct DailyMilkTotal: Identifiable {
     let weightGrams: Int64
     let sessionCount: Int
     var id: String { localDay }
-    var isEstimated: Bool { sessionCount == 1 }
+    var expectedMilkings: Int = 2
+    var inHeat: Bool = false
+    var isEstimated: Bool { sessionCount == 1 && expectedMilkings == 2 }
     var chartWeightGrams: Int64 { isEstimated ? weightGrams * 2 : weightGrams }
 }
 
@@ -22,6 +25,13 @@ struct MilkChartSnapshot {
     var goats: [Goat] = []
     var dailyTotals: [Int64: [DailyMilkTotal]] = [:]
     var distributions: [MilkDistribution] = []
+    var hayDays: [String] = []
+}
+
+enum CSVExport {
+    static func row(_ fields: [String]) -> String {
+        fields.map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: ",") + "\r\n"
+    }
 }
 
 enum MilkingSession: String, CaseIterable, Identifiable {

@@ -1,8 +1,10 @@
 import SwiftUI
 import Charts
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     let database: Database
+    @Environment(\.scenePhase) private var scenePhase
     @State private var goats: [Goat] = []
     @State private var records: [MilkRecord] = []
     @State private var hayReplacements: [HayReplacement] = []
@@ -10,6 +12,9 @@ struct ContentView: View {
     @State private var dataGoats: [Goat] = []
     @State private var chartSnapshot = MilkChartSnapshot()
     @State private var newGoatName = ""
+    @State private var newMilkingsPerDay = 2
+    @State private var goatToEdit: Goat?
+    @State private var export: CSVFileExport?
     @State private var weights: [Int64: String] = [:]
     @State private var inHeat: [Int64: Bool] = [:]
     @State private var hayReplaced = false
@@ -29,7 +34,19 @@ struct ContentView: View {
             goatsView.tabItem { Label("Goats", systemImage: "list.bullet") }.tag(2)
             dataView.tabItem { Label("Data", systemImage: "chart.xyaxis.line") }.tag(3)
         }
-        .task { perform { try reload() } }
+        .task { refreshEntryTime(); perform { try reload() } }
+        .onChange(of: selectedTab) { tab in if tab == 0 { refreshEntryTime() } }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active { refreshEntryTime(); perform { try reload() } }
+        }
+        .sheet(item: $goatToEdit) { goat in
+            MilkingScheduleEditor(goat: goat) { count, effectiveDate in
+                try database.setMilkingSchedule(goatID: goat.id, milkingsPerDay: count,
+                                               effectiveDay: Database.localDay(effectiveDate))
+                try reload()
+            }
+        }
+        .sheet(item: $export) { file in CSVExportView(file: file) }
         .alert("Something needs attention", isPresented: Binding(
             get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
         )) { Button("OK", role: .cancel) {} } message: { Text(errorMessage ?? "") }
@@ -135,7 +152,7 @@ struct ContentView: View {
                     Button("Done") { focusedGoat = nil }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Now") { date = Date(); session = .current(); confirmation = nil }
+                    Button("Now", action: refreshEntryTime)
                 }
             }
         }
@@ -148,19 +165,30 @@ struct ContentView: View {
                     TextField("Goat’s name", text: $newGoatName)
                         .textInputAutocapitalization(.words).autocorrectionDisabled()
                         .onSubmit(addGoat)
+                    Picker("Milkings per day", selection: $newMilkingsPerDay) {
+                        Text("Once").tag(1)
+                        Text("Twice").tag(2)
+                    }
                     Button("Add goat", action: addGoat)
                         .disabled(newGoatName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 Section {
                     if goats.isEmpty { Text("Your goats will appear here.").foregroundStyle(.secondary) }
                     ForEach(goats) { goat in
-                        Text(goat.name)
+                        Button { goatToEdit = goat } label: {
+                            HStack {
+                                Text(goat.name)
+                                Spacer()
+                                Text("\(goat.milkingsPerDay) / day").foregroundStyle(.secondary)
+                                Image(systemName: "chevron.right").font(.caption)
+                            }
+                        }
                             .swipeActions(allowsFullSwipe: false) {
                                 Button("Retire", role: .destructive) { goatToRetire = goat }
                             }
                     }
                 } header: { Text("Currently milking · \(goats.count)") }
-                footer: { Text("Swipe a goat to retire it from the entry form. Its saved records are kept.") }
+                footer: { Text("Tap a goat to edit its milking frequency. Swipe to retire it; saved records are kept.") }
             }.navigationTitle("Your goats")
         }
     }
@@ -215,6 +243,11 @@ struct ContentView: View {
     private var dataView: some View {
         NavigationStack {
             List {
+                Section {
+                    Button {
+                        perform { export = try CSVFileExport(csv: database.exportCSV()) }
+                    } label: { Label("Export all data as CSV", systemImage: "square.and.arrow.up") }
+                } footer: { Text("All goats and dates. Weight is in grams. Hay events use separate rows with no goat name.") }
                 if dataGoats.isEmpty {
                     Section {
                         Text("Add a goat to get started.").font(.headline)
@@ -295,7 +328,7 @@ struct ContentView: View {
                                 HStack {
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(total.date, format: chartDateFormat)
-                                        Text(total.isEstimated ? "Estimated · 2 × \(total.weightGrams.formatted()) g recorded" : "Morning + evening")
+                                        Text(total.isEstimated ? "Estimated · 2 × \(total.weightGrams.formatted()) g recorded" : "\(total.sessionCount) recorded · \(total.expectedMilkings) scheduled")
                                             .font(.caption).foregroundStyle(.secondary)
                                     }
                                     Spacer()
@@ -326,13 +359,23 @@ struct ContentView: View {
                     PointMark(x: .value("Date", total.date), y: .value("Milk (g)", total.chartWeightGrams))
                         .foregroundStyle(by: .value("Goat", dataGoatLabel(goat)))
                         .accessibilityLabel("\(dataGoatLabel(goat)), \(total.date.formatted(chartDateFormat))")
-                        .accessibilityValue("\(total.chartWeightGrams) grams, \(total.isEstimated ? "estimated from one session" : "morning and evening recorded")")
+                        .accessibilityValue("\(total.chartWeightGrams) grams, \(total.isEstimated ? "estimated from one session" : "\(total.sessionCount) recorded sessions")")
+                        .annotation(position: .top) {
+                            if total.inHeat {
+                                Text("🔥").accessibilityLabel("\(goat.name) in heat")
+                            }
+                        }
                 }
+            }
+            ForEach(hayChartDates, id: \.self) { hayDate in
+                PointMark(x: .value("Date", hayDate), y: .value("Milk (g)", chartMaximum * 1.18))
+                    .symbol { Text("🍃") }
+                    .accessibilityLabel("Hay replaced, \(hayDate.formatted(chartDateFormat))")
             }
         }
         .chartLegend(position: .bottom)
         .chartForegroundStyleScale(domain: selectedDataGoats.map(dataGoatLabel))
-        .chartYScale(domain: 0...max(1, Double(chartTotals.map(\.chartWeightGrams).max() ?? 0) * 1.1))
+        .chartYScale(domain: 0...(chartMaximum * 1.35))
         .chartXScale(domain: chartDateRange)
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 4)) { value in
@@ -429,6 +472,17 @@ struct ContentView: View {
         return first.addingTimeInterval(-43_200)...last.addingTimeInterval(43_200)
     }
 
+    private var chartMaximum: Double { max(1, Double(chartTotals.map(\.chartWeightGrams).max() ?? 0)) }
+
+    private var hayChartDates: [Date] {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd"
+        return chartSnapshot.hayDays.compactMap { formatter.date(from: $0) }.filter { chartDateRange.contains($0) }
+    }
+
     private var selectedDataGoats: [Goat] {
         chartSnapshot.goats
     }
@@ -455,8 +509,9 @@ struct ContentView: View {
 
     private func addGoat() {
         perform {
-            try database.addGoat(name: newGoatName)
+            try database.addGoat(name: newGoatName, milkingsPerDay: newMilkingsPerDay)
             newGoatName = ""
+            newMilkingsPerDay = 2
             try reload()
         }
     }
@@ -481,6 +536,13 @@ struct ContentView: View {
             hayReplaced = false
             try reload()
         }
+    }
+
+    private func refreshEntryTime() {
+        let now = Date()
+        date = now
+        session = .current(at: now)
+        confirmation = nil
     }
 
     private func reload() throws {
@@ -511,6 +573,98 @@ struct ContentView: View {
 
     private func perform(_ action: () throws -> Void) {
         do { try action() } catch { errorMessage = error.localizedDescription }
+    }
+}
+
+private struct MilkingScheduleEditor: View {
+    let goat: Goat
+    let save: (Int, Date) throws -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var count: Int
+    @State private var effectiveDate = Date()
+    @State private var error: String?
+
+    init(goat: Goat, save: @escaping (Int, Date) throws -> Void) {
+        self.goat = goat
+        self.save = save
+        _count = State(initialValue: goat.milkingsPerDay)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Picker("Milkings per day", selection: $count) {
+                    Text("Once").tag(1)
+                    Text("Twice").tag(2)
+                }
+                DatePicker("Effective from", selection: $effectiveDate, in: ...Date(), displayedComponents: .date)
+                Text("Earlier days keep their previous schedule. This changes graph estimates, not recorded weights. A later schedule change, if any, still takes effect on its saved date.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                if let error { Text(error).foregroundStyle(.red) }
+            }
+            .navigationTitle(goat.name)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        do { try save(count, effectiveDate); dismiss() }
+                        catch { self.error = error.localizedDescription }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct CSVFileExport: Identifiable {
+    let id = UUID()
+    let csv: String
+    let url: URL
+    init(csv: String) throws {
+        self.csv = csv
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        url = directory.appendingPathComponent("goat-milk.csv")
+        try Data(csv.utf8).write(to: url, options: .atomic)
+    }
+}
+
+private struct CSVDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.commaSeparatedText] }
+    var csv: String
+    init(csv: String) { self.csv = csv }
+    init(configuration: ReadConfiguration) throws {
+        csv = String(decoding: configuration.file.regularFileContents ?? Data(), as: UTF8.self)
+    }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: Data(csv.utf8))
+    }
+}
+
+private struct CSVExportView: View {
+    let file: CSVFileExport
+    @Environment(\.dismiss) private var dismiss
+    @State private var saving = false
+    @State private var message: String?
+    var body: some View {
+        NavigationStack {
+            Form {
+                ShareLink(item: file.url) { Label("Share CSV", systemImage: "square.and.arrow.up") }
+                Button("Save to Files") { saving = true }
+                Text("Includes all recorded milkings and hay replacements. Weight is in grams; flags use 0 or 1. Times include the saved timezone’s UTC offset.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                if let message { Text(message) }
+            }
+            .navigationTitle("Export all data")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .fileExporter(isPresented: $saving, document: CSVDocument(csv: file.csv), contentType: .commaSeparatedText,
+                          defaultFilename: "goat-milk") { result in
+                switch result {
+                case .success: message = "CSV saved."
+                case .failure(let error): message = error.localizedDescription
+                }
+            }
+        }
     }
 }
 
